@@ -1,0 +1,181 @@
+#!/bin/bash
+set -e
+LANG=C
+
+ETC=${HOME}/etc
+ACTIVES=${ETC}/lxc/actives
+DISABLE=${ETC}/lxc/disables
+VMDIR=/var/lib/lxc
+SEEDARC=${ETC}/lxc/centos6-lxc-root.tgz
+TMP=${HOME}/tmp
+
+#種がなければ異常終了する
+[ ! -f ${SEEDARC} ] && exit 1
+
+#ディレクトリ作成
+for A in ${ETC} ${TMP}
+do
+  mkdir -p $A
+done
+
+################################################################################################
+listmainte(){
+echo -n > ${ACTIVES}
+echo -n > ${DISABLE}
+for B in $(seq 0 9)
+do
+# アクティブなコンテナをactivesに追加する
+if [ -d ${VMDIR}/vm${B} -a 1 = $(ifconfig | grep ^veth-vm${B} | wc -l) ];
+  then
+    [ 0 = $(grep vm${B} ${ACTIVES} | wc -l) ] && echo vm${B} >> ${ACTIVES}
+fi
+# 停止中のコンテナをdisablesに追加する
+if [ -d ${VMDIR}/vm${B} -a ! 1 = $(ifconfig | grep ^veth-vm${B} | wc -l) ];
+  then
+    [ 0 = $(grep vm${B} ${DISABLE} | wc -l) ] && echo vm${B} >> ${DISABLE}
+fi
+done
+}
+################################################################################################
+create(){
+#vmの作成上限(10個)に達していたら処理を中断する
+if [ 10 = $(grep . ${ACTIVES} ${DISABLE} | wc -l) ];
+  then
+    cat ${ACTIVES} ${DISABLE}
+    exit 10
+fi
+
+#vmのリストをソートし、次のVM番号を決める
+if [ 0 = $(cat ${ACTIVES} ${DISABLE} | wc -l) ];
+  then
+    NEXT=vm0
+  else
+    NEXT=vm$(for C in {0..9}; do [ 0 = $(grep ${C} ${ACTIVES} | wc -l) -a 0 = $(grep ${C} ${DISABLE} | wc -l) ] && echo ${C} ;done | sort | uniq | head -n 1)
+fi
+
+#vmのディレクトリを作成する。あれば削除してから新規作成する。
+[ -d ${VMDIR}/${NEXT} ] && sudo rm -fr ${VMDIR}/${NEXT}
+[ ! -d ${VMDIR}/${NEXT} ] && sudo mkdir ${VMDIR}/${NEXT}
+
+#rootファイルシステムとなるディレクトリを作成する
+sudo mkdir -p ${VMDIR}/${NEXT}/rootfs
+
+#テンプレートのアーカイブを展開する
+cd ${VMDIR}/${NEXT}/rootfs
+sudo tar xzf ${SEEDARC} --numeric-owner
+
+#vmのconfigファイルを作成する
+cd ${VMDIR}/${NEXT}
+sudo touch ${VMDIR}/${NEXT}/config
+sudo chmod 666 ${VMDIR}/${NEXT}/config
+cat > ${VMDIR}/${NEXT}/config << END
+lxc.network.type=veth
+lxc.network.link=lxcbr0
+lxc.network.flags=up
+lxc.network.veth.pair=veth-${NEXT}
+lxc.utsname = ${NEXT}
+lxc.tty = 1
+lxc.pts = 1024
+lxc.rootfs = ${VMDIR}/${NEXT}/rootfs
+lxc.mount  = ${VMDIR}/${NEXT}/fstab
+lxc.arch = x86_64
+lxc.cap.drop = sys_module mac_admin 
+lxc.cgroup.devices.deny = a
+lxc.cgroup.devices.allow = c *:* m
+lxc.cgroup.devices.allow = b *:* m
+lxc.cgroup.devices.allow = c 1:3 rwm
+lxc.cgroup.devices.allow = c 1:5 rwm
+lxc.cgroup.devices.allow = c 5:1 rwm
+lxc.cgroup.devices.allow = c 5:0 rwm
+lxc.cgroup.devices.allow = c 1:9 rwm
+lxc.cgroup.devices.allow = c 1:8 rwm
+lxc.cgroup.devices.allow = c 136:* rwm
+lxc.cgroup.devices.allow = c 5:2 rwm
+lxc.cgroup.devices.allow = c 254:0 rwm
+lxc.cgroup.devices.allow = c 10:229 rwm
+lxc.cgroup.devices.allow = c 10:200 rwm
+lxc.cgroup.devices.allow = c 1:7 rwm
+lxc.cgroup.devices.allow = c 10:228 rwm
+lxc.cgroup.devices.allow = c 10:232 rwm
+END
+sudo chmod 644 ${VMDIR}/${NEXT}/config
+
+#fstab を作成する
+sudo touch fstab
+sudo chmod 666 fstab
+cat > fstab  << END
+proc            ${VMDIR}/${NEXT}/rootfs/proc         proc    nodev,noexec,nosuid 0 0
+sysfs           ${VMDIR}/${NEXT}/rootfs/sys          sysfs defaults  0 0
+END
+sudo chmod 644 fstab
+
+#eth0設定
+cd ${VMDIR}/${NEXT}/rootfs/etc/sysconfig/network-scripts
+sudo chmod 666 ifcfg-eth0
+cat > ifcfg-eth0 << END
+DEVICE=eth0
+IPADDR=10.0.10.1$(echo ${NEXT} | sed -e s/vm//)
+NETMASK=255.255.255.0
+GATEWAY=10.0.10.1
+ONBOOT=yes
+TYPE=Ethernet
+END
+sudo chmod 644 ifcfg-eth0
+
+#vm起動
+sudo lxc-start -n ${NEXT} -l debug -o /dev/null -d && \
+echo ${NEXT} >> ${ACTIVES}
+
+}
+################################################################################################
+
+case $1 in
+  [cC][rR][eE][aA][tT][eE])
+    listmainte
+    create && listmainte
+    ;;
+  [mM][aA][iI][nN][tT][eE])
+    listmainte
+    ;;
+  [lL][iI][sS][tT])
+    if [ ! 0 = $(grep . ${ACTIVES} ${DISABLE} | wc -l) ];
+    then
+      echo $(basename ${ACTIVES})
+      cat ${ACTIVES}
+      echo
+      echo $(basename ${DISABLE})
+      cat ${DISABLE}
+      echo
+    fi
+    ;;
+  [sS][tT][aA][rR][tT])
+    if [ $# = 2 -a 1 = $(echo $2 | egrep '(vm[0-9]$)' | wc -l) ];
+    then
+      sudo lxc-start -n $2 -l debug -o /dev/null -d
+      listmainte
+    else
+      echo "Usage: $(basename $0) start vm[0-9]"
+    fi
+    ;;
+  [sS][tT][oO][pP])
+    if [ $# = 2 -a 1 = $(echo $2 | egrep '(vm[0-9]$)' | wc -l) ];
+    then
+      sudo lxc-stop --name $2
+      listmainte
+    else
+      echo "Usage: $(basename $0) stop vm[0-9]"
+    fi
+    ;;
+  [dD][eE][sS][tT][rR][oO][yY])
+    if [ $# = 2 -a 1 = $(echo $2 | egrep '(vm[0-9]$)' | wc -l) ];
+    then
+      sudo lxc-stop --name $2 && \
+      sudo lxc-destroy --name $2
+      listmainte
+    else
+      echo "Usage: $(basename $0) destroy vm[0-9]"
+    fi
+    ;;
+  *)
+    echo "Usage: $(basename $0) {create|mainte|list|start vm[0-9]|stop vm[0-9]|destroy vm[0-9]}"
+esac
